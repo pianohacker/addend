@@ -1,4 +1,5 @@
 .title "ARMForth"
+// vim: set ft=asm :
 
 #define UART_START 0x09000000
 /* Word Address - address of the next forth word to be executed */
@@ -171,20 +172,30 @@ defcode "0BRANCH", 7, , 0BRANCH
 _NEXT
 
 /* ## Stack manipulation */
+// `( value -- )`, drops a value from the stack.
 defcode "DROP", 4, , DROP
 	_POP x0
 _NEXT
 
 /* ## Return stack manipulation */
+// `( new-return-stack -- )`, changes the return stack pointer.
 defcode "RSP!", 4, , RSPSTORE
 	_POP fp
 _NEXT
 
 /* ## Memory */
+// `( address -- value )`, fetches a word from memory.
 defcode "@", 1, , FETCH
 	_POP x1
 	ldr x0, [x1]
 	_PUSH x0
+_NEXT
+
+// `( address value -- )`, stores a word in memory.
+defcode "!", 1, , STORE
+	_POP x1
+	_POP x0
+	str x1, [x0]
 _NEXT
 
 /* ## Control structures */
