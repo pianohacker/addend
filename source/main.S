@@ -30,7 +30,7 @@
 
 /* # Useful macros */
 /* ## Constants */
-.set F_IMMED,0x80
+.set F_IMMEDIATE,0x80
 .set F_HIDDEN,0x20
 .set F_LENMASK,0x1f	// length mask
 
@@ -178,8 +178,14 @@ var_\name:
 	br x8
 .endm
 
-.macro _CALL func
+.macro _CALL func, saved_vars = 0
+	.ifgt \saved_vars
+		_SAVE \saved_vars
+	.endif
 	bl \func
+	.ifgt \saved_vars
+		_LOAD \saved_vars
+	.endif
 .endm
 
 .macro _FUNC func
@@ -197,7 +203,7 @@ var_\name:
 .align 3
 DOCOL:
 	_PUSH_RS wa
-	add wa, cw, 8	
+	add wa, cw, 8
 	_NEXT
 
 /* ## Entry point */
@@ -219,13 +225,69 @@ _interpret_start:
 	.dword QUIT
 
 /* # Builtins */
+/* ## Arithmetic */
+// `( a b -- sum )`, adds two integers.
+defcode "+", 1, , ADD
+	_POP x9, x10
+	add x9, x9, x10
+	_PUSH x9
+_NEXT
+
+// `( a b -- difference )`, subtracts two integers (a - b).
+defcode "-", 1, , SUB
+	_POP x9, x10
+	sub x9, x9, x10
+	_PUSH x9
+_NEXT
+
+// `( a b -- product )`, multiplies two integers.
+defcode "*", 1, , MULT
+	_POP x9, x10
+	smull x9, w9, w10
+	_PUSH x9
+_NEXT
+
+// `( a b -- quotient )`, divides two integers (a / b).
+defcode "/", 1, , DIV
+	_POP x9, x10
+	sdiv x9, x9, x10
+	_PUSH x9
+_NEXT
+
+// `( a b -- modulus )`, pushes a % b.
+defcode "MOD", 1, , MOD
+	_POP x9, x10
+	// This approach is taken from GCC:
+	//
+	//     a % b = a - (a // b) * b
+	//
+	// First, `x11 = x9(a) // x10`.
+	sdiv x11, x9, x10
+	// Then, `x9(a) - x11(a // b) * x10`. (The ARM operand ordering is screwy.)
+	msub x9, x11, x10, x9
+	_PUSH x9
+_NEXT
+
+/* ## Comparison */
+.macro _2CMP
+	_POP x9, x10
+	cmp x9, x10
+.endm
+
+defcode "=", 1, , EQUAL
+	_2CMP
+	mov x11, 1
+	csel x11, x11, xzr, eq
+	_PUSH x11
+_NEXT
+
 /* ## Syntax */
 defcode "LIT", 3, , LIT
 	ldr cw, [wa], 8
 	_PUSH cw
 _NEXT
 
-// `( -- ) name`, pushes the address of the next word on the stack
+// `( -- ) name`, pushes the address of the next word on the stack.
 defcode "'", 1, , TICK
 	ldr x9, [wa], 8
 	_PUSH x9
@@ -244,10 +306,27 @@ defcode "0BRANCH", 7, , ZBRANCH
 	add wa, wa, 8
 _NEXT
 
+defcode "CHAR", 4, , CHAR
+	_CALL _WORD
+	cmp x1, 0
+	b.eq CHAR_done
+
+	ldrb w9, [x0]
+	_PUSH x9
+
+	CHAR_done:
+_NEXT
+
 /* ## Stack manipulation */
 // `( value -- )`, drops a value from the stack.
 defcode "DROP", 4, , DROP
 	_POP x0
+_NEXT
+
+// `( val1 val2 -- val2 val1 )`, swaps the top two values on the stack.
+defcode "SWAP", 4, , SWAP
+	_POP x9, x10
+	_PUSH x10, x9
 _NEXT
 
 /* ## Return stack manipulation */
@@ -333,7 +412,7 @@ _FUNC _FIND
 	ldrb w12, [x0,x10]
 	cmp w11, w12
 	b.ne _FIND_next
-	
+
 	add x10, x10, 1
 	cmp x10, x1
 	// We made it all the way to the end of the word without a mismatch; we're good!
@@ -345,14 +424,14 @@ _FUNC _FIND
 	b _FIND_loop
 
 	_FIND_done:
-_RETURN
+	_RETURN
 
 /* ## Codeword manipulation */
 _FUNC _COMMA
 	_GETVAR HERE, x9
 	str x0, [x9], 8
 	_SETVAR HERE, x9
-_RETURN
+	_RETURN
 
 // `(value -- )`, appends the value to user memory.
 defcode ",", 1, , COMMA
@@ -369,6 +448,15 @@ defcode "HIDDEN", 6, , HIDDEN
 	strb w9, [x0]
 _NEXT
 
+// `( -- )`, toggles the immediate state of the most recent word.
+defcode "IMMEDIATE", 9, F_IMMEDIATE, IMMEDIATE
+	_GETVAR LATEST, x9
+	// Skip the link.
+	ldrb w10, [x9, 8]!
+	eor w10, w10, F_IMMEDIATE
+	strb w10, [x9]
+_NEXT
+
 // `( -- ) word-name`, starts defining a new word.
 defword ":", 1, , COLON
 	.dword WORD
@@ -380,7 +468,7 @@ defword ":", 1, , COLON
 _NEXT
 
 // `( -- )`, finishes defining a new word.
-defword ";", 1, F_IMMED, SEMICOLON
+defword ";", 1, F_IMMEDIATE, SEMICOLON
 	.dword LIT, EXIT, COMMA
 	.dword LATEST, FETCH, HIDDEN
 	.dword LBRAC
@@ -390,7 +478,7 @@ _NEXT
 _FUNC _TCFA
 	// Skip the link.
 	add x0, x0, 8
-	
+
 	// Skip the name.
 	ldrb w9, [x0]
 	add x0, x0, 1
@@ -401,7 +489,7 @@ _FUNC _TCFA
 	// ... and align.
 	add x0, x0, 7
 	and x0, x0, ~7
-_RETURN
+	_RETURN
 
 // `(word-entry -- codeword-ptr)`, converts a word address to a codeword address.
 defcode ">CFA", 4, , TCFA
@@ -459,7 +547,7 @@ _FUNC _KEY
 	strb w0, [x10]
 
 	_KEY_done:
-_RETURN
+	_RETURN
 
 defcode "WORD", 4, , WORD
 	_CALL _WORD
@@ -471,9 +559,7 @@ _FUNC _WORD
 	mov x1, 0
 
 	_WORD_key:
-	_SAVE 2
-	_CALL _KEY
-	_LOAD 2
+	_CALL _KEY, 2
 
 	cmp w0, '\\'
 	b.eq _WORD_skip_comment
@@ -495,25 +581,29 @@ _FUNC _WORD
 	_RETURN
 
 	_WORD_skip_comment:
-	_SAVE 2
-	_CALL _KEY
-	_LOAD 2
+	_CALL _KEY, 2
 	cmp w0, '\n'
 	b.ne _WORD_skip_comment
 	b _WORD_key
-_RETURN
+	_RETURN
 
-_FUNC _CTELL
+_FUNC _EMIT
 	ldr x8, =UART_START
 	strb w0, [x8]
-_RETURN
+	_RETURN
+
+// `( character -- )`, emits a single character.
+defcode "EMIT", 4, , EMIT
+	_POP x0
+	_CALL _EMIT
+_NEXT
 
 _FUNC _TELL
 	cmp x1, 0
 	b.eq _TELL_done
 
 	ldr x9, =UART_START
-	
+
 	_TELL_char:
 	ldrb w10, [x0], 1
 	strb w10, [x9]
@@ -522,7 +612,7 @@ _FUNC _TELL
 	b.ne _TELL_char
 
 	_TELL_done:
-_RETURN
+	_RETURN
 
 defcode "TELL", 4, , TELL
 	_POP x0, x1
@@ -541,7 +631,7 @@ _NEXT
 
 /* ## Interpreter */
 // Switch to immediate (interpreting) mode.
-defcode "[", 1, F_IMMED, LBRAC
+defcode "[", 1, F_IMMEDIATE, LBRAC
 	mov x0, 0
 	_SETVAR STATE, x0
 _NEXT
@@ -571,7 +661,7 @@ _FUNC _NUMBER
 	cmp w11, '-'
 	b.eq _NUMBER_neg
 	b _NUMBER_char
-	
+
 	_NUMBER_neg:
 	mov x10, -1
 	add x9, x9, 1
@@ -589,7 +679,7 @@ _FUNC _NUMBER
 	cmp w11, 25
 	b.gt _NUMBER_fail
 	add w11, w11, 10
-	
+
 	_NUMBER_digit:
 	cmp w11, w12
 	b.ge _NUMBER_fail
@@ -607,7 +697,7 @@ _FUNC _NUMBER
 	_NUMBER_done:
 	// Multiply in the sign.
 	mul x3, x3, x10
-_RETURN
+	_RETURN
 
 defcode "REPL", 4, , REPL
 	_CALL _WORD
@@ -618,7 +708,7 @@ defcode "REPL", 4, , REPL
 	_CALL _FIND
 	cmp x2, 0
 	b.ne REPL_interpret
-	
+
 	// If it wasn't a valid word, maybe it's a number.
 	REPL_maybe_number:
 	_CALL _NUMBER
@@ -650,7 +740,7 @@ defcode "REPL", 4, , REPL
 	_POP_RS x0
 	_CALL _TELL
 	mov w0, '\n'
-	_CALL _CTELL
+	_CALL _EMIT
 	b REPL_done
 
 	REPL_interpret:
@@ -665,14 +755,14 @@ defcode "REPL", 4, , REPL
 
 	//   or b) the word is immediate.
 	ldrb w10, [x2, 8]
-	and w10, w10, F_IMMED
+	and w10, w10, F_IMMEDIATE
 	cmp x10, 0
 	b.ne REPL_run
 
 	// Otherwise, we need to compile it.
 	_CALL _COMMA
 	b REPL_done
-	
+
 	REPL_run:
 	mov cw, x0
 	ldr x8, [cw]

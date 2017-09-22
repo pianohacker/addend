@@ -31,6 +31,13 @@ LINKER = kernel.ld
 # assembly code files in source.
 OBJECTS := $(patsubst $(SOURCE)/%.S,$(BUILD)/%.o,$(wildcard $(SOURCE)/*.S))
 
+# Targeted CPU.
+TARGET_CPU = cortex-a57
+
+QEMU := qemu-system-aarch64
+
+QEMUFLAGS := -d guest_errors -M virt -cpu $(TARGET_CPU) -nographic -serial mon:stdio
+
 # Rule to make everything.
 all: $(TARGET) $(LIST)
 
@@ -47,7 +54,7 @@ $(BUILD)/kernel.elf : $(OBJECTS) $(LINKER)
 
 # Rule to make the object files.
 $(BUILD)/%.o: $(SOURCE)/%.s $(BUILD)
-	$(ARMGNU)-as -g -I $(SOURCE) $< -o $@
+	$(ARMGNU)-as -mcpu=$(TARGET_CPU) -g -I $(SOURCE) $< -o $@
 
 $(BUILD)/main.o: $(SOURCE)/builtins.fs
 
@@ -55,7 +62,10 @@ $(BUILD):
 	mkdir $@
 
 qemu: all
-	qemu-system-aarch64 -d guest_errors -M virt -cpu cortex-a57 -nographic -kernel build/kernel.elf -serial mon:stdio -S -s
+	$(QEMU) $(QEMUFLAGS) -kernel build/kernel.elf -S -s
+
+qemu-nogdb: all
+	$(QEMU) $(QEMUFLAGS) -kernel build/kernel.elf
 
 gdb:
 	$(ARMGNU)-gdb build/kernel.elf -ex 'target remote localhost:1234' -ex 'set confirm off' -ex 'layout prev'
