@@ -49,6 +49,8 @@ $(BUILD)/kernel.elf : $(OBJECTS) $(LINKER)
 $(BUILD)/%.o: $(SOURCE)/%.s $(BUILD)
 	$(ARMGNU)-as -g -I $(SOURCE) $< -o $@
 
+$(BUILD)/main.o: $(SOURCE)/builtins.fs
+
 $(BUILD):
 	mkdir $@
 

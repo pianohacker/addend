@@ -2,16 +2,31 @@
 // vim: set ft=asm :
 
 #define UART_START 0x09000000
-/* Word Address - address of the next forth word to be executed */
-#define wa x19
-/* Current Word - contents of the currently executing forth word */
-#define cw x20
-/* Stack Pointer - current top of the data stack */
-#define sp x21
-/* Frame Pointer - current top of the return stack */
+
+// # Defined registers
+// This code uses the available registers according to the [AArch64 Procedure Call
+// Standard](http://infocenter.arm.com/help/topic/com.arm.doc.ihi0055b/IHI0055B_aapcs64.pdf) to the
+// best of its ability, i.e.:
+//
+//  * x0-x7 are used to pass parameters/results between functions.
+//  * x8 is used as a temporary address register for indirect loads.
+//  * x9-x15 are used as temporary registers, and must be saved by the caller before any call.
+//  * x16 and x17 are off limits, as the assembler may use them in stubs to call faraway functions.
+//  * x20-x27 are callee-saved temporary registers.
+//  * x29 (the Frame Pointer) is used to hold the current top of the return stack.
 #define fp x29
-/* Link Register (ARM ABI defined) - next instruction after `bl` */
+//  * x30 (the Link Register) holds the location of the next instruction after the last `bl`.
 #define lr x30
+//
+// However, we have three more special registers of our own:
+//  * x18 holds the Word Address, or the address of the next word to be executed.
+#define wa x18
+//  * x19 holds the Current Word, or the contents of the currently running word. This is mainly
+//    used by DOCOL, which needs a argument location for _NEXT and REPL.
+#define cw x19
+//  * x28 holds the Stack Pointer, or the top of the data stack. We ignore the standard stack
+//    pointer because of the strict 16-byte alignment requirement.
+#define sp x28
 
 /* # Useful macros */
 /* ## Constants */
@@ -95,12 +110,64 @@ var_\name:
 .endm
 
 /* ## Data stack macros */
-.macro _PUSH reg
-	str \reg, [sp, -8]!
+// The argument order of these macros matches the order of the values on the stack (top to the
+// right); i.e.,
+//
+//     _PUSH x1, x2, x3
+//
+// matches:
+//
+//     _POP x1, x2, x3
+//
+// This makes the memory math and recursion below a bit odd.
+.macro _PUSH reg1:req, reg2, rest:vararg
+	.ifnb \reg2
+	stp \reg2, \reg1, [sp, -16]!
+	.else
+	str \reg1, [sp, -8]!
+	.endif
+
+	.ifnb \rest
+		_PUSH \rest
+	.endif
 .endm
 
-.macro _POP reg
-	ldr \reg, [sp], 8
+.macro _POP reg1:req, reg2, rest:vararg
+	.ifnb \rest
+		_POP \rest
+	.endif
+
+	.ifnb \reg2
+	ldp \reg2, \reg1, [sp], 16
+	.else
+	ldr \reg1, [sp], 8
+	.endif
+.endm
+
+.macro _SAVE num
+	_PUSH x9, x10
+	.ifgt \num - 2
+	_PUSH x11, x12
+	.endif
+	.ifgt \num - 4
+	_PUSH x13, x14
+	.endif
+	.ifgt \num - 6
+	_PUSH x15, x16
+	.endif
+.endm
+
+.macro _LOAD num
+	.ifgt \num - 6
+	_POP x15, x16
+	.endif
+	.ifgt \num - 4
+	_POP x13, x14
+	.endif
+	.ifgt \num - 2
+	_POP x11, x12
+	.endif
+	_POP x9, x10
 .endm
 
 /* ## Control flow macros */
@@ -158,12 +225,18 @@ defcode "LIT", 3, , LIT
 	_PUSH cw
 _NEXT
 
+// `( -- ) name`, pushes the address of the next word on the stack
+defcode "'", 1, , TICK
+	ldr x9, [wa], 8
+	_PUSH x9
+_NEXT
+
 defcode "BRANCH", 6, , BRANCH
 	ldr x0, [wa]
 	add wa, wa, x0
 _NEXT
 
-defcode "0BRANCH", 7, , 0BRANCH
+defcode "0BRANCH", 7, , ZBRANCH
 	_POP x0
 	cmp x0, 0
 	b.eq code_BRANCH
@@ -211,29 +284,29 @@ defcode "CREATE", 6, , CREATE
 	// Get address of name.
 	_POP x0
 
-	_GETVAR HERE, x2
-	_GETVAR LATEST, x3
+	_GETVAR HERE, x9
+	_GETVAR LATEST, x10
 
-	str x3, [x2]
-	mov x3, x2
-	add x2, x2, 8
-	strb w1, [x2], 1
+	str x10, [x9]
+	mov x10, x9
+	add x9, x9, 8
+	strb w1, [x9], 1
 
-	mov x4, 0
+	mov x11, 0
 	_CREATE_copy_name:
-	ldrb w5, [x0,x4]
-	strb w5, [x2,x4]
-	add x4, x4, 1
-	cmp x4, x1
+	ldrb w12, [x0,x11]
+	strb w12, [x9,x11]
+	add x11, x11, 1
+	cmp x11, x1
 	b.ne _CREATE_copy_name
-	add x2, x2, x1
+	add x9, x9, x1
 
 	// Align to next 8-byte boundary.
-	add x2, x2, 7
-	and x2, x2, ~7
+	add x9, x9, 7
+	and x9, x9, ~7
 
-	_SETVAR HERE, x2
-	_SETVAR LATEST, x3
+	_SETVAR HERE, x9
+	_SETVAR LATEST, x10
 _NEXT
 
 _FUNC _FIND
@@ -245,24 +318,24 @@ _FUNC _FIND
 	b.eq _FIND_done
 
 	// Skip the link.
-	add x3, x2, 8
+	add x9, x2, 8
 
 	// Read and check the length byte; we don't mask out F_HIDDEN to make sure hidden words never
 	// match.
-	ldrb w4, [x3], 1
-	and w4, w4, (F_HIDDEN | F_LENMASK)
-	cmp w4, w1
+	ldrb w10, [x9], 1
+	and w10, w10, (F_HIDDEN | F_LENMASK)
+	cmp w10, w1
 	b.ne _FIND_next
 
-	mov x4, 0
+	mov x10, 0
 	_FIND_char:
-	ldrb w5, [x3,x4]
-	ldrb w6, [x0,x4]
-	cmp w5, w6
+	ldrb w11, [x9,x10]
+	ldrb w12, [x0,x10]
+	cmp w11, w12
 	b.ne _FIND_next
 	
-	add x4, x4, 1
-	cmp x4, x1
+	add x10, x10, 1
+	cmp x10, x1
 	// We made it all the way to the end of the word without a mismatch; we're good!
 	b.eq _FIND_done
 	b _FIND_char
@@ -276,9 +349,9 @@ _RETURN
 
 /* ## Codeword manipulation */
 _FUNC _COMMA
-	_GETVAR HERE, x1
-	str x0, [x1], 8
-	_SETVAR HERE, x1
+	_GETVAR HERE, x9
+	str x0, [x9], 8
+	_SETVAR HERE, x9
 _RETURN
 
 // `(value -- )`, appends the value to user memory.
@@ -291,9 +364,9 @@ _NEXT
 defcode "HIDDEN", 6, , HIDDEN
 	_POP x0
 	// Skip the link.
-	ldrb w1, [x0, 8]!
-	eor w1, w1, F_HIDDEN
-	strb w1, [x0]
+	ldrb w9, [x0, 8]!
+	eor w9, w9, F_HIDDEN
+	strb w9, [x0]
 _NEXT
 
 // `( -- ) word-name`, starts defining a new word.
@@ -319,11 +392,11 @@ _FUNC _TCFA
 	add x0, x0, 8
 	
 	// Skip the name.
-	ldrb w1, [x0]
+	ldrb w9, [x0]
 	add x0, x0, 1
 
-	and w1, w1, F_LENMASK
-	add x0, x0, x1
+	and w9, w9, F_LENMASK
+	add x0, x0, x9
 
 	// ... and align.
 	add x0, x0, 7
@@ -342,88 +415,108 @@ _NEXT
 // `( -- char)`, reads a single character.
 defcode "KEY", 3, , KEY
 	_CALL _KEY
-	_PUSH x4
+	_PUSH x0
 _NEXT
 
 _FUNC _KEY
-	ldr x6, =UART_START
+	ldr x10, =__builtins_def_end
+	ldr x8, =__loading_builtins
+	ldr x9, [x8]
+	cmp x9, 0
+	b.eq _KEY_serial
+	ldrb w0, [x9], 1
+	cmp x9, x10
+	b.ne _KEY_builtin_done
+	mov x9, 0
+	_KEY_builtin_done:
+	str x9, [x8]
+	b _KEY_done
+
+	_KEY_serial:
+	ldr x10, =UART_START
 	_KEY_wait_for_input:
 	// Load RXFF (receive fifo full) from UARTFR (flags register)
-	ldrb w5, [x6,0x18]
-	ubfx w5, w5, 6, 1
-	cmp w5, 1
-	b.ne _KEY_wait_for_input
+	ldrb w9, [x10,0x18]
+	ubfx w9, w9, 6, 1
+	cmp w9, 1
+	b.eq _KEY_read
+	wfe
+	b _KEY_wait_for_input
 
 	_KEY_read:
-	ldrb w4, [x6]
+	ldrb w0, [x10]
 
-	cmp w4, '\r'
+	cmp w0, '\r'
 	b.ne _KEY_read_done
-	mov w4, '\n'
+	mov w0, '\n'
 	_KEY_read_done:
 
 	// Echo typed character if desired
-	ldr x8, =var_ECHO
-	ldr x7, [x8]
-	cmp x7, 0
+	ldr x12, =var_ECHO
+	ldr x11, [x12]
+	cmp x11, 0
 	b.eq _KEY_done
-	strb w4, [x6]
+	strb w0, [x10]
 
 	_KEY_done:
 _RETURN
 
 defcode "WORD", 4, , WORD
 	_CALL _WORD
-	_PUSH x0
-	_PUSH x1
+	_PUSH x0, x1
 _NEXT
 
 _FUNC _WORD
-	ldr x0, =__word_read_buffer
+	ldr x9, =__word_read_buffer
 	mov x1, 0
 
 	_WORD_key:
+	_SAVE 2
 	_CALL _KEY
+	_LOAD 2
 
-	cmp w4, '\\'
+	cmp w0, '\\'
 	b.eq _WORD_skip_comment
-	cmp w4, ' '
+	cmp w0, ' '
 	b.eq _WORD_done
-	cmp w4, '\t'
+	cmp w0, '\t'
 	b.eq _WORD_done
-	cmp w4, '\r'
+	cmp w0, '\r'
 	b.eq _WORD_done
-	cmp w4, '\n'
+	cmp w0, '\n'
 	b.eq _WORD_done
 
-	strb w4, [x0,x1]
+	strb w0, [x9,x1]
 	add x1, x1, 1
 	b _WORD_key
 
 	_WORD_done:
+	mov x0, x9
 	_RETURN
 
 	_WORD_skip_comment:
+	_SAVE 2
 	_CALL _KEY
-	cmp w4, '\n'
+	_LOAD 2
+	cmp w0, '\n'
 	b.ne _WORD_skip_comment
 	b _WORD_key
 _RETURN
 
 _FUNC _CTELL
-	ldr x1, =UART_START
-	strb w0, [x1]
+	ldr x8, =UART_START
+	strb w0, [x8]
 _RETURN
 
 _FUNC _TELL
 	cmp x1, 0
 	b.eq _TELL_done
 
-	ldr x2, =UART_START
+	ldr x9, =UART_START
 	
 	_TELL_char:
-	ldrb w3, [x0], 1
-	strb w3, [x2]
+	ldrb w10, [x0], 1
+	strb w10, [x9]
 	sub x1, x1, 1
 	cmp x1, 0
 	b.ne _TELL_char
@@ -432,10 +525,18 @@ _FUNC _TELL
 _RETURN
 
 defcode "TELL", 4, , TELL
-	_POP x1
-	_POP x0
+	_POP x0, x1
 
 	_CALL _TELL
+_NEXT
+
+defcode "LITSTRING", 9, , LITSTRING
+	ldr x9, [wa], 8
+	_PUSH wa, x9
+	// Skip past the string, then align.
+	add wa, wa, x9
+	add wa, wa, 7
+	and wa, wa, ~7
 _NEXT
 
 /* ## Interpreter */
@@ -458,45 +559,45 @@ _FUNC _NUMBER
 	// Resulting number.
 	mov x3, 0
 	// Position in the word.
-	mov x4, 0
+	mov x9, 0
 	// Sign of the word.
-	mov x5, 1
+	mov x10, 1
 	// Current character.
-	mov w6, 0
+	mov w11, 0
 	// Current base.
-	_GETVAR BASE, x7
+	_GETVAR BASE, x12
 
-	ldrb w6, [x0]
-	cmp w6, '-'
+	ldrb w11, [x0]
+	cmp w11, '-'
 	b.eq _NUMBER_neg
 	b _NUMBER_char
 	
 	_NUMBER_neg:
-	mov x5, -1
-	add x4, x4, 1
+	mov x10, -1
+	add x9, x9, 1
 
 	_NUMBER_char:
-	mul x3, x3, x7
-	ldrb w6, [x0,x4]
+	mul x3, x3, x12
+	ldrb w11, [x0,x9]
 
-	subs w6, w6, '0'
+	subs w11, w11, '0'
 	b.lt _NUMBER_fail
-	cmp w6, 9
+	cmp w11, 9
 	b.le _NUMBER_digit
-	subs w6, w6, 'A' - '0'
+	subs w11, w11, 'A' - '0'
 	b.lt _NUMBER_fail
-	cmp w6, 25
+	cmp w11, 25
 	b.gt _NUMBER_fail
-	add w6, w6, 10
+	add w11, w11, 10
 	
 	_NUMBER_digit:
-	cmp w6, w7
+	cmp w11, w12
 	b.ge _NUMBER_fail
 	add x3, x3, x6
 
 	_NUMBER_next_char:
-	add x4, x4, 1
-	cmp x4, x1
+	add x9, x9, 1
+	cmp x9, x1
 	b.eq _NUMBER_done
 	b _NUMBER_char
 
@@ -505,7 +606,7 @@ _FUNC _NUMBER
 
 	_NUMBER_done:
 	// Multiply in the sign.
-	mul x3, x3, x5
+	mul x3, x3, x10
 _RETURN
 
 defcode "REPL", 4, , REPL
@@ -518,20 +619,24 @@ defcode "REPL", 4, , REPL
 	cmp x2, 0
 	b.ne REPL_interpret
 	
+	// If it wasn't a valid word, maybe it's a number.
 	REPL_maybe_number:
 	_CALL _NUMBER
 	cmp x2, 0
 	b.eq REPL_invalid
 
-	_GETVAR STATE, x4
-	cmp x4, 0
+	// If it is a number, then we need to either:
+	_GETVAR STATE, x9
+	cmp x9, 0
 	b.eq REPL_interpret_number
-	ldr x0, =LIT
+	//   a) if compiling, push the number (with a preceding lit) onto the current definition
+	ldr x10, =LIT
 	_CALL _COMMA
-	mov x0, x3
+	mov x10, x3
 	_CALL _COMMA
 	b REPL_done
 	REPL_interpret_number:
+	//   b) or, if interpreting, just push it on the stack.
 	_PUSH x3
 	b REPL_done
 
@@ -554,14 +659,14 @@ defcode "REPL", 4, , REPL
 
 	// We should run the word if either:
 	//   a) We're in immediate mode
-	_GETVAR STATE, x3
-	cmp x3, 0
+	_GETVAR STATE, x9
+	cmp x9, 0
 	b.eq REPL_run
 
 	//   or b) the word is immediate.
-	ldrb w3, [x2, 8]
-	and w3, w3, F_IMMED
-	cmp x3, 0
+	ldrb w10, [x2, 8]
+	and w10, w10, F_IMMED
+	cmp x10, 0
 	b.ne REPL_run
 
 	// Otherwise, we need to compile it.
@@ -601,7 +706,8 @@ defvar "STATE", 5, , STATE, 0
 defvar "BASE", 4, , BASE, 10
 
 .section .data
-.pool
+__loading_builtins:
+	.dword __builtins_def_start
 
 welcome_message:
 	.ascii "Welcome to ARMForth!\n"
@@ -622,4 +728,9 @@ __return_stack_end:
 .skip 0x10000
 __data_stack_end:
 
+__builtins_def_start:
+.incbin "builtins.fs"
+__builtins_def_end:
+
+.align 3
 __data_seg_end:
