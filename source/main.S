@@ -2,7 +2,7 @@
 // vim: set ft=asm :
 
 .set UART_START, 0x09000000
-.set PSCI_0_2_FN64_CPU_OFF, 0x84000000 + 0x40000000 + 2
+.set PSCI_0_2_FN_SYSTEM_OFF, 0x84000000 + 8
 
 // # Defined registers
 // This code uses the available registers according to the [AArch64 Procedure Call
@@ -13,7 +13,7 @@
 //  * x8 is used as a temporary address register for indirect loads.
 //  * x9-x15 are used as temporary registers, and must be saved by the caller before any call.
 //  * x16 and x17 are off limits, as the assembler may use them in stubs to call faraway functions.
-//  * x20-x27 are callee-saved temporary registers.
+//  * x20-x26 are callee-saved temporary registers.
 //  * x29 (the Frame Pointer) is used to hold the current top of the return stack.
 #define fp x29
 //  * x30 (the Link Register) holds the location of the next instruction after the last `bl`.
@@ -25,6 +25,9 @@
 //  * x19 holds the Current Word, or the contents of the currently running word. This is mainly
 //    used by docol, which needs a argument location for _next and repl.
 #define cw x19
+//  * x27 holds the Hold Pointer, or the top of the hold stack. This stack holds some temporary data
+//    for combinators and the base address of held code segments and data.
+#define hp x27
 //  * x28 holds the Stack Pointer, or the top of the data stack. We ignore the standard stack
 //    pointer because of the strict 16-byte alignment requirement.
 #define sp x28
@@ -101,13 +104,13 @@ var_\name:
 .endm
 
 /* # Startup */
-/* ## Return stack macros */
-.macro _push_rs reg
-	str \reg, [fp, -8]!
+/* ## Alternate stack macros */
+.macro _push_alt stackreg:req, reg:req
+	str \reg, [\stackreg, -8]!
 .endm
 
-.macro _pop_rs reg
-	ldr \reg, [fp], 8
+.macro _pop_alt stackreg:req, reg
+	ldr \reg, [\stackreg], 8
 .endm
 
 /* ## Data stack macros */
@@ -191,11 +194,11 @@ var_\name:
 
 .macro _func func
 	\func:
-	_push_rs lr
+	_push_alt fp, lr
 .endm
 
 .macro _return
-	_pop_rs lr
+	_pop_alt fp, lr
 	ret lr
 .endm
 
@@ -203,7 +206,7 @@ var_\name:
 .section .init
 .align 3
 docol:
-	_push_rs wa
+	_push_alt fp, wa
 	add wa, cw, 8
 	_next
 
@@ -336,10 +339,34 @@ defcode "dup", 3, , dup
 	_push x9
 _next
 
-/* ## Return stack manipulation */
+/* ## Alternate stack manipulation */
 // `( new-return-stack -- )`, changes the return stack pointer.
 defcode "rsp!", 4, , rspstore
 	_pop fp
+_next
+
+// `( val -- )`, pushes the given value to the return stack.
+defcode "r>", 4, , tors
+	_pop x0
+	_push_alt fp, x0
+_next
+
+// `( -- val )`, pops a value from the return stack.
+defcode "r>", 4, , fromrs
+	_pop_alt fp, x0
+	_push x0
+_next
+
+// `( val -- )`, pushes the given value to the hold stack.
+defcode "h>", 4, , tohs
+	_pop x0
+	_push_alt hp, x0
+_next
+
+// `( -- val )`, pops a value from the hold stack.
+defcode "h>", 4, , fromhs
+	_pop_alt hp, x0
+	_push x0
 _next
 
 /* ## Memory */
@@ -358,7 +385,7 @@ _next
 
 /* ## Control structures */
 defcode "exit", 4, , exit
-	_pop_rs wa
+	_pop_alt fp, wa
 _next
 
 /* ## Dictionary manipulation */
@@ -707,9 +734,9 @@ _func _number
 	_return
 
 defcode "halt", 4, , halt
-	ldr x0, =PSCI_0_2_FN64_CPU_OFF
-	smc 0
-	_return
+	ldr x0, =PSCI_0_2_FN_SYSTEM_OFF
+	hvc 0
+	_next
 
 defcode "repl", 4, , repl
 	_call _word
@@ -744,13 +771,11 @@ defcode "repl", 4, , repl
 	b repl_done
 
 	repl_invalid:
-	_push_rs x0
-	_push_rs x1
+	_push x0, x1
 	ldr x0, =error_message
 	ldr x1, =error_message_len
 	_call _tell
-	_pop_rs x1
-	_pop_rs x0
+	_pop x0, x1
 	_call _tell
 	mov w0, '\n'
 	_call _emit

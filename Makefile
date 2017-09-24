@@ -36,7 +36,7 @@ TARGET_CPU = cortex-a57
 
 QEMU := qemu-system-aarch64
 
-QEMUFLAGS := -d guest_errors -M virt -cpu $(TARGET_CPU) -nographic -serial mon:stdio
+QEMUFLAGS := -d guest_errors,unimp -M virt -cpu $(TARGET_CPU) -nographic -serial mon:stdio
 
 # Rule to make everything.
 all: $(TARGET) $(LIST)
