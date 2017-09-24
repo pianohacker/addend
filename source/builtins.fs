@@ -1,16 +1,30 @@
 \ Built in functions; inserted into compiled kernel.
 
 \ # Constants and shortcuts
-: LITERAL IMMEDIATE
-	' LIT ,
+: literal immediate
+	' lit ,
 	,
 	;
 
 \ ## Character constants
 : '\n' 10 ;
-: SP 32 ;
-: '0' [ CHAR 0 ] LITERAL ;
-: 'A' [ CHAR A ] LITERAL ;
+: sp 32 ;
+: '0' [ char 0 ] literal ;
+: 'A' [ char A ] literal ;
+
+\ # Control structures
+: if immediate
+	' 0branch ,
+	here @
+	0 ,
+;
+
+: endif immediate
+	dup
+	here @
+	swap -
+	!
+;
 
 \ # I/O
 
