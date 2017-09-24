@@ -74,7 +74,6 @@ name_\label:
 \label:
 	.dword code_\label	// codeword
 .text
-	//.align 4
 	.globl code_\label
 code_\label :			// assembler code follows
 .endm
@@ -83,13 +82,13 @@ code_\label :			// assembler code follows
 
 .macro defvar name, namelen, flags=0, label, initial=0
 	defcode \name,\namelen,\flags,\label
-		ldr x0, =var_\name
+		ldr x0, =var_\label
 		_push x0
 	_next
 
 .section .data
 	.align 3
-var_\name:
+var_\label:
 	.dword \initial
 .endm
 
@@ -217,8 +216,8 @@ _start:
 	// Set up the stack starting locations.
 	ldr fp, =__return_stack_end
 	ldr sp, =__data_stack_end
-	_setvar R0, fp
-	_setvar S0, sp
+	_setvar rz, fp
+	_setvar sz, sp
 
 	// Set the next word as "quit."
 	ldr wa, =_interpret_start
@@ -346,26 +345,32 @@ defcode "rsp!", 4, , rspstore
 _next
 
 // `( val -- )`, pushes the given value to the return stack.
-defcode "r>", 4, , tors
+defcode "r>", 2, , tors
 	_pop x0
 	_push_alt fp, x0
 _next
 
 // `( -- val )`, pops a value from the return stack.
-defcode "r>", 4, , fromrs
+defcode "r>", 2, , fromrs
 	_pop_alt fp, x0
 	_push x0
 _next
 
 // `( val -- )`, pushes the given value to the hold stack.
-defcode "h>", 4, , tohs
+defcode "h>", 2, , tohs
 	_pop x0
 	_push_alt hp, x0
 _next
 
 // `( -- val )`, pops a value from the hold stack.
-defcode "h>", 4, , fromhs
+defcode "h>", 2, , fromhs
 	_pop_alt hp, x0
+	_push x0
+_next
+
+// `( -- val )`, fetches a value from the hold stack without changing it.
+defcode "h@", 2, , fetchhs
+	ldr x0, [hp]
 	_push x0
 _next
 
@@ -540,18 +545,19 @@ defcode "key", 3, , key
 _next
 
 _func _key
-	ldr x10, =__builtins_def_end
-	ldr x8, =__loading_builtins
-	ldr x9, [x8]
+	_GETVAR key_buffer, x9
 	cmp x9, 0
 	b.eq _key_serial
+
+	_GETVAR key_buffer_end, x10
 	ldrb w0, [x9], 1
 	cmp x9, x10
-	b.ne _key_builtin_done
+	b.ne _key_bufread_done
 	mov x9, 0
-	_key_builtin_done:
-	str x9, [x8]
-	b _key_done
+
+	_key_bufread_done:
+	_SETVAR key_buffer, x9
+	_return
 
 	_key_serial:
 	ldr x10, =UART_START
@@ -733,6 +739,7 @@ _func _number
 	mul x3, x3, x10
 	_return
 
+// `( -- )`, powers off the machine.
 defcode "halt", 4, , halt
 	ldr x0, =PSCI_0_2_FN_SYSTEM_OFF
 	hvc 0
@@ -820,8 +827,8 @@ defword "quit", 4, , quit
 
 /* # Builtin variables */
 /* Start of data and return stacks. */
-defvar "S0", 2, , sz
-defvar "R0", 2, , rz
+defvar "s0", 2, , sz
+defvar "r0", 2, , rz
 /* Whether `key` echos while it reads. */
 defvar "echo", 4, , echo, 1
 /* Most recently defined word; initial value must be the last builtin word in this file. */
@@ -832,11 +839,12 @@ defvar "here", 4, , here, __data_seg_end
 defvar "state", 5, , state, 0
 /* Base we are currently interpreting numbers in. */
 defvar "base", 4, , base, 10
+// Start and end of current `key` input buffer. `key` will _immediately_ start reading from
+// `key-buffer` if it is nonzero.
+defvar "key-buffer", 10, , key_buffer, __builtins_def_start
+defvar "key-buffer-end", 14, , key_buffer_end, __builtins_def_end
 
 .section .data
-__loading_builtins:
-	.dword __builtins_def_start
-
 welcome_message:
 	.ascii "Welcome to ARMForth!\n"
 .set welcome_message_len, . - welcome_message

@@ -14,16 +14,16 @@
 
 \ # Control structures
 : if immediate
+	hold
 	' 0branch ,
-	here @
 	0 ,
 ;
 
 : endif immediate
-	dup
-	here @
-	swap -
+	h@
+	here @ h@ - 
 	!
+	play
 ;
 
 \ # I/O
