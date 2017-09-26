@@ -214,9 +214,11 @@ docol:
 _start:
 	//### Interpreter initialization
 	// Set up the stack starting locations.
+	ldr hp, =__hold_stack_end
+	_setvar hz, hp
 	ldr fp, =__return_stack_end
-	ldr sp, =__data_stack_end
 	_setvar rz, fp
+	ldr sp, =__data_stack_end
 	_setvar sz, sp
 
 	// Set the next word as "quit."
@@ -297,13 +299,13 @@ defcode "'", 1, , tick
 _next
 
 defcode "branch", 6, , branch
-	ldr x0, [wa]
-	add wa, wa, x0
+	ldr x9, [wa]
+	add wa, wa, x9
 _next
 
 defcode "0branch", 7, , zbranch
-	_pop x0
-	cmp x0, 0
+	_pop x9
+	cmp x9, 0
 	b.eq code_branch
 
 	add wa, wa, 8
@@ -357,7 +359,7 @@ defcode "r>", 2, , fromrs
 _next
 
 // `( val -- )`, pushes the given value to the hold stack.
-defcode "h>", 2, , tohs
+defcode ">h", 2, , tohs
 	_pop x0
 	_push_alt hp, x0
 _next
@@ -501,7 +503,7 @@ defword ":", 1, , colon
 	.dword create
 	.dword lit, docol, comma
 	.dword latest, fetch, hidden
-	.dword rbrac
+	.dword hlplus
 	.dword exit
 _next
 
@@ -509,7 +511,7 @@ _next
 defword ";", 1, F_IMMEDIATE, semicolon
 	.dword lit, exit, comma
 	.dword latest, fetch, hidden
-	.dword lbrac
+	.dword hlminus
 	.dword exit
 _next
 
@@ -670,16 +672,18 @@ defcode "litstring", 9, , litstring
 _next
 
 /* ## Interpreter */
-// Switch to immediate (interpreting) mode.
+// Temporarily switch to immediate (interpreting) mode.
 defcode "[", 1, F_IMMEDIATE, lbrac
+	_getvar level, x0
+	_push_alt hp, x0
 	mov x0, 0
-	_setvar state, x0
+	_setvar level, x0
 _next
 
-// Switch to compiling mode.
+// Return to the previous mode.
 defcode "]", 1, , rbrac
-	mov x0, 1
-	_setvar state, x0
+	_pop_alt hp, x0
+	_setvar level, x0
 _next
 
 // Interpret the given word as a number.
@@ -745,6 +749,77 @@ defcode "halt", 4, , halt
 	hvc 0
 	_next
 
+// `( -- )`, starts a new hold level.
+_func _hlplus
+	_getvar level, x0
+	add x0, x0, 1
+	_setvar level, x0
+	_return
+
+defcode "hl+", 4, , hlplus
+	_call _hlplus
+	_next
+
+// `( -- )`, finishes a hold level.
+_func _hlminus
+	_getvar level, x9
+	subs x0, x9, 1
+	// If x0 is >= 0, use it, otherwise fall back to the original x9 (which must be 0).
+	csel x0, x0, x9, ge
+	_setvar level, x0
+	_return
+
+defcode "hl-", 4, , hlminus
+	_call _hlminus
+	_next
+
+// `( -- )`, starts a hold level and saves the current `here`.
+defcode "record", 6, , record
+	_call _hlplus
+
+	_getvar here, x10
+	_push_alt hp, x10
+	_next
+
+// `( -- )`, finishes a hold level and plays it.
+//
+// This has two different possible effects, depending on the new hold level:
+//   * >= 1: just leaves the complied code since the last `record` in the definition segment.
+//   * 0: after gluing on an `exit`, the code since the last `record` is immediately run.
+//
+// This means that words that manipulate the definition segment can behave identically when used in
+// compiled and interpreted mode.
+defcode "play", 4, , play
+	_call _hlminus
+
+	_pop_alt hp, x9
+
+	cmp x0, 0
+	b.gt play_done
+
+	ldr x0, =exit	
+	_call _comma, 2
+
+	// We are playing tricky games with `docol` here; we're loading up the cw for it, but because
+	// there isn't actually a `docol` on the front of our "word", we have to undo `docol`'s skip of
+	// itself.
+	sub cw, x9, 8
+	b docol
+
+	play_done:
+	_next
+
+// `( -- addr )`, packages the code since the last `record` and gives back the address.
+defcode "save", 4, , save
+	_call _hlminus
+
+	_pop_alt hp, x9
+	ldr x0, =exit	
+	_call _comma
+
+	_push x9
+	_next
+
 defcode "repl", 4, , repl
 	_call _word
 	cmp x1, 0
@@ -762,7 +837,7 @@ defcode "repl", 4, , repl
 	b.eq repl_invalid
 
 	// If it is a number, then we need to either:
-	_getvar state, x9
+	_getvar level, x9
 	cmp x9, 0
 	b.eq repl_interpret_number
 	//   a) if compiling, push the number (with a preceding lit) onto the current definition
@@ -793,8 +868,8 @@ defcode "repl", 4, , repl
 	_call _tcfa
 
 	// We should run the word if either:
-	//   a) We're in immediate mode
-	_getvar state, x9
+	//   a) We're in interpreting mode
+	_getvar level, x9
 	cmp x9, 0
 	b.eq repl_run
 
@@ -826,7 +901,8 @@ defword "quit", 4, , quit
 	.dword branch, -16
 
 /* # Builtin variables */
-/* Start of data and return stacks. */
+/* Start of stacks. */
+defvar "h0", 2, , hz
 defvar "s0", 2, , sz
 defvar "r0", 2, , rz
 /* Whether `key` echos while it reads. */
@@ -835,8 +911,8 @@ defvar "echo", 4, , echo, 1
 defvar "latest", 6, , latest, name_base
 /* Position of next allocated byte. */
 defvar "here", 4, , here, __data_seg_end
-/* Is repl compiling? (0 = interpreting) */
-defvar "state", 5, , state, 0
+/* How many levels are held? (0 = interpreting) */
+defvar "level", 5, , level, 0
 /* Base we are currently interpreting numbers in. */
 defvar "base", 4, , base, 10
 // Start and end of current `key` input buffer. `key` will _immediately_ start reading from
@@ -858,6 +934,10 @@ __word_read_buffer:
 
 .align 3
 .skip 0x1000
+__hold_stack_end:
+
+.align 3
+.skip 0x1000
 __return_stack_end:
 
 .align 3
@@ -869,4 +949,3 @@ __builtins_def_start:
 __builtins_def_end:
 
 .align 3
-__data_seg_end:
