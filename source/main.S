@@ -23,7 +23,7 @@
 //  * x18 holds the Word Address, or the address of the next word to be executed.
 #define wa x18
 //  * x19 holds the Current Word, or the contents of the currently running word. This is mainly
-//    used by docol, which needs a argument location for _next and repl.
+//    used by `enter`, which needs a argument location for _next and repl.
 #define cw x19
 //  * x27 holds the Hold Pointer, or the top of the hold stack. This stack holds some temporary data
 //    for combinators and the base address of held code segments and data.
@@ -32,69 +32,71 @@
 //    pointer because of the strict 16-byte alignment requirement.
 #define sp x28
 
-/* # Useful macros */
-/* ## Constants */
+// # Useful macros
+// ## Constants
 .set F_IMMEDIATE,0x80
 .set F_HIDDEN,0x20
 .set F_LENMASK,0x1f	// length mask
 
-/*  Store the chain of links. */
+// Store the chain of links.
 .set link,0
 
-/* Lifted almost directly from jonesforth. */
-/* ## `defword` - define a forth primitive */
+// Lifted almost directly from jonesforth.
+// ## `defword` - define a forth primitive
 .macro defword name, namelen, flags=0, label
 	.section .data
 	.balign 8
-	.globl name_\label
-name_\label:
-	.dword link		// link
-	.set link,name_\label
-	.byte \flags+\namelen	// flags + length byte
-	.ascii "\name"		// the name
+	.global name_\label
+	name_\label:
+		.dword link		// link
+		.set link,name_\label
+		.byte \flags+\namelen	// flags + length byte
+		.ascii "\name"		// the name
+
 	.balign 8		// padding to next 8 byte boundary
-	.globl \label
-\label:
-	.dword docol		// codeword - the interpreter
-	// list of word pointers follow
+	.global \label
+	\label:
+		.dword enter		// codeword - the interpreter
+		// list of word pointers follow
 .endm
 
-/* ## `defcode` - define an assembler primitive */
+// ## `defcode` - define an assembler primitive
 .macro defcode name, namelen, flags=0, label
 	.section .data
 	.balign 8
-	.globl name_\label
-name_\label:
-	.dword link		// link
-	.set link,name_\label
-	.byte \flags+\namelen	// flags + length byte
-	.ascii "\name"		// the name
+	.global name_\label
+	name_\label:
+		.dword link		// link
+		.set link,name_\label
+		.byte \flags+\namelen	// flags + length byte
+		.ascii "\name"		// the name
+
 	.balign 8	// padding to next 8 byte boundary
 	.globl \label
-\label:
-	.dword code_\label	// codeword
-.text
+	\label:
+		.dword code_\label	// codeword
+
+	.section .text
 	.globl code_\label
-code_\label :			// assembler code follows
+	code_\label :			// assembler code follows
 .endm
 
-/* ## `defvar` - define a variable */
-
+// ## `defvar` - define a variable
 .macro defvar name, namelen, flags=0, label, initial=0
 	defcode \name,\namelen,\flags,\label
 		ldr x0, =var_\label
 		_push x0
 	_next
 
-.section .data
-	.align 3
-var_\label:
-	.dword \initial
+	.section .data
+	.balign 8
+	var_\label:
+		.dword \initial
 .endm
 
-.macro _setvar variable, value
+.macro _setvar variable, source
 	ldr x8, =var_\variable
-	str \value, [x8]
+	str \source, [x8]
 .endm
 
 .macro _getvar variable, dest
@@ -102,8 +104,22 @@ var_\label:
 	ldr \dest, [x8]
 .endm
 
-/* # Startup */
-/* ## Alternate stack macros */
+// ## `defconst` - define a const.
+.macro defconst name, namelen, flags=0, label, initial=0
+	defcode \name,\namelen,\flags,\label
+		ldr x8, =const_\label
+		ldr x9, [x8]
+		_push x9
+	_next
+
+	.section .data
+	.balign 8
+	const_\label:
+		.dword \initial
+.endm
+
+// # Startup
+// ## Alternate stack macros
 .macro _push_alt stackreg:req, reg:req
 	str \reg, [\stackreg, -8]!
 .endm
@@ -112,7 +128,7 @@ var_\label:
 	ldr \reg, [\stackreg], 8
 .endm
 
-/* ## Data stack macros */
+// ## Data stack macros
 // The argument order of these macros matches the order of the values on the stack (top to the
 // right); i.e.,
 //
@@ -173,7 +189,7 @@ var_\label:
 	_pop x9, x10
 .endm
 
-/* ## Control flow macros */
+// ## Control flow macros
 
 .macro _next
 	ldr cw, [wa], 8
@@ -201,15 +217,15 @@ var_\label:
 	ret lr
 .endm
 
-/* ## `docol` - main interpreter */
+// ## `enter` - main interpreter
 .section .init
 .align 3
-docol:
+enter:
 	_push_alt fp, wa
 	add wa, cw, 8
 	_next
 
-/* ## Entry point */
+// ## Entry point
 .global _start
 _start:
 	//### Interpreter initialization
@@ -229,8 +245,8 @@ _start:
 _interpret_start:
 	.dword quit
 
-/* # Builtins */
-/* ## Arithmetic */
+// # Builtins
+// ## Arithmetic
 // `( a b -- sum )`, adds two integers.
 defcode "+", 1, , add
 	_pop x9, x10
@@ -273,7 +289,7 @@ defcode "mod", 3, , mod
 	_push x9
 _next
 
-/* ## Comparison */
+// ## Comparison
 .macro _2cmp
 	_pop x9, x10
 	cmp x9, x10
@@ -286,7 +302,7 @@ defcode "=", 1, , equal
 	_push x11
 _next
 
-/* ## Syntax */
+// ## Syntax
 defcode "lit", 3, , lit
 	ldr cw, [wa], 8
 	_push cw
@@ -322,7 +338,7 @@ defcode "char", 4, , char
 	char_done:
 _next
 
-/* ## Stack manipulation */
+// ## Stack manipulation
 // `( value -- )`, drops a value from the stack.
 defcode "drop", 4, , drop
 	_pop x0
@@ -340,7 +356,7 @@ defcode "dup", 3, , dup
 	_push x9
 _next
 
-/* ## Alternate stack manipulation */
+// ## Alternate stack manipulation
 // `( new-return-stack -- )`, changes the return stack pointer.
 defcode "rsp!", 4, , rspstore
 	_pop fp
@@ -376,7 +392,7 @@ defcode "h@", 2, , fetchhs
 	_push x0
 _next
 
-/* ## Memory */
+// ## Memory
 // `( address -- value )`, fetches a word from memory.
 defcode "@", 1, , fetch
 	_pop x1
@@ -390,12 +406,12 @@ defcode "!", 1, , store
 	str x1, [x0]
 _next
 
-/* ## Control structures */
+// ## Control structures
 defcode "exit", 4, , exit
 	_pop_alt fp, wa
 _next
 
-/* ## Dictionary manipulation */
+// ## Dictionary manipulation
 // `( word-addr word-len -- )`, creates a new word.
 defcode "create", 6, , create
 	// Get length of name.
@@ -466,7 +482,7 @@ _func _find
 	_find_done:
 	_return
 
-/* ## Codeword manipulation */
+// ## Codeword manipulation
 _func _comma
 	_getvar here, x9
 	str x0, [x9], 8
@@ -501,7 +517,7 @@ _next
 defword ":", 1, , colon
 	.dword word
 	.dword create
-	.dword lit, docol, comma
+	.dword lit, enter, comma
 	.dword latest, fetch, hidden
 	.dword hlplus
 	.dword exit
@@ -538,7 +554,7 @@ defcode ">cfa", 4, , tcfa
 	_push x0
 _next
 
-/* ## I/O */
+// ## I/O
 
 // `( -- char)`, reads a single character.
 defcode "key", 3, , key
@@ -558,7 +574,7 @@ _func _key
 	mov x9, 0
 
 	_key_bufread_done:
-	_SETVAR key_buffer, x9
+	_setvar key_buffer, x9
 	_return
 
 	_key_serial:
@@ -671,7 +687,7 @@ defcode "litstring", 9, , litstring
 	and wa, wa, ~7
 _next
 
-/* ## Interpreter */
+// ## Interpreter
 // Temporarily switch to immediate (interpreting) mode.
 defcode "[", 1, F_IMMEDIATE, lbrac
 	_getvar level, x0
@@ -800,11 +816,11 @@ defcode "play", 4, , play
 	ldr x0, =exit	
 	_call _comma, 2
 
-	// We are playing tricky games with `docol` here; we're loading up the cw for it, but because
-	// there isn't actually a `docol` on the front of our "word", we have to undo `docol`'s skip of
+	// We are playing tricky games with `enter` here; we're loading up the cw for it, but because
+	// there isn't actually a `enter` on the front of our "word", we have to undo `enter`'s skip of
 	// itself.
 	sub cw, x9, 8
-	b docol
+	b enter
 
 	play_done:
 	_next
@@ -815,10 +831,17 @@ defcode "save", 4, , save
 
 	_pop_alt hp, x9
 	ldr x0, =exit	
-	_call _comma
+	_call _comma, 2
 
 	_push x9
 	_next
+
+// `( codeword-addr -- )`, runs the code at the given address.
+defcode "execute", 7, , execute
+	_pop x9
+	mov cw, x9
+	ldr x8, [cw]
+	br x8
 
 defcode "repl", 4, , repl
 	_call _word
@@ -889,7 +912,7 @@ defcode "repl", 4, , repl
 	br x8
 
 	repl_done:
-_next
+	_next
 
 
 defword "quit", 4, , quit
@@ -900,25 +923,28 @@ defword "quit", 4, , quit
 	.dword repl
 	.dword branch, -16
 
-/* # Builtin variables */
-/* Start of stacks. */
+// # Builtin variables
+// Start of stacks.
 defvar "h0", 2, , hz
 defvar "s0", 2, , sz
 defvar "r0", 2, , rz
-/* Whether `key` echos while it reads. */
+// Whether `key` echos while it reads.
 defvar "echo", 4, , echo, 1
-/* Most recently defined word; initial value must be the last builtin word in this file. */
-defvar "latest", 6, , latest, name_base
-/* Position of next allocated byte. */
+// Most recently defined word; initial value must be the last builtin word in this file.
+defvar "latest", 6, , latest, name_enter_
+// Position of next allocated byte.
 defvar "here", 4, , here, __data_seg_end
-/* How many levels are held? (0 = interpreting) */
+// How many levels are held? (0 = interpreting)
 defvar "level", 5, , level, 0
-/* Base we are currently interpreting numbers in. */
+// Base we are currently interpreting numbers in.
 defvar "base", 4, , base, 10
 // Start and end of current `key` input buffer. `key` will _immediately_ start reading from
 // `key-buffer` if it is nonzero.
 defvar "key-buffer", 10, , key_buffer, __builtins_def_start
 defvar "key-buffer-end", 14, , key_buffer_end, __builtins_def_end
+
+// # Builtin constants
+defconst "enter", 5, , enter_, enter
 
 .section .data
 welcome_message:

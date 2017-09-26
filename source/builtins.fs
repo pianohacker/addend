@@ -13,11 +13,18 @@
 : 'A' [ char A ] literal ;
 
 \ # Control structures
+: mark-here here @ >h ;
+: update-mark-offset
+	h@
+	here @ h> -
+	!
+	;
+
 : if immediate
 	record
 	' 0branch ,
 	\ Save location of offset on stack
-	here @ >h
+	mark-here
 	0 ,
 ;
 
@@ -37,13 +44,35 @@
 ;
 
 : endif immediate
-	h@
-	here @ h> -
-	!
+	update-mark-offset
+	play
+;
 
+: { immediate
+	\ Put a branch over the following quotation in the compiled code.
+	\ This will be harmlessly ignored in interpreted mode.
+	' branch ,
+	mark-here
+	0 ,
+
+	record
+	enter ,
+;
+
+: } immediate
+	' exit ,
+	save
+
+	update-mark-offset
+
+	record
+	' lit ,
+	,
 	play
 ;
 
 \ # I/O
-0 if 33 emit else 65 emit endif
-1 if 66 emit else 34 emit endif
+: test { 64 1 + } dup execute execute emit emit ;
+0 if 33 emit else 66 emit endif
+test
+
