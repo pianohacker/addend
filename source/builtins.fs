@@ -48,6 +48,8 @@
 	play
 ;
 
+\ ## Quotations
+
 : { immediate
 	\ Put a branch over the following quotation in the compiled code.
 	\ This will be harmlessly ignored in interpreted mode.
@@ -60,7 +62,6 @@
 ;
 
 : } immediate
-	' exit ,
 	save
 
 	update-mark-offset
@@ -71,8 +72,27 @@
 	play
 ;
 
+\ ## Combinators
+: keep
+	swap
+	dup
+	>h
+
+	swap
+	execute 
+
+	h>
+;
+
+: bi
+	-rot \ q2 x q1
+	keep \ q2 a x
+	rot \ a x q2
+	execute
+;
+
 \ # I/O
-: test { 64 1 + } dup execute execute emit emit ;
+: test 64 { 3 + } { 4 + } bi emit emit ;
 0 if 33 emit else 66 emit endif
 test
 

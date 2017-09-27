@@ -118,6 +118,20 @@
 		.dword \initial
 .endm
 
+// ## `defconstinst` - define a const based on an assembled instruction.
+// This must be followed by an instruction and `.skip 4`.
+.macro defconst name, namelen, flags=0, label
+	defcode \name,\namelen,\flags,\label
+		ldr x8, =const_\label
+		ldr x9, [x8]
+		_push x9
+	_next
+
+	.section .data
+	.balign 8
+	const_\label:
+.endm
+
 // # Startup
 // ## Alternate stack macros
 .macro _push_alt stackreg:req, reg:req
@@ -219,16 +233,76 @@
 
 // ## `enter` - main interpreter
 .section .init
-.align 3
+.balign 8
 enter:
 	_push_alt fp, wa
 	add wa, cw, 8
 	_next
 
+// ## Exception handler
+// We add another `emit` here that doesn't depend on a functional return stack.
+.macro _bare_emit, char
+	mov x9, \char
+	ldr x8, =UART_START
+	strb w9, [x8]
+.endm
+
+.balign 0x200
+_exc_handler:
+	mrs x10, esr_el1
+	// Extract the ISS and EC, respectively.
+	ubfx x0, x10, 0, 25 
+	ubfx x1, x10, 26, 6 
+
+	mrs x2, elr_el1
+
+	ldr x3, =__data_stack_end
+	sub x3, x3, sp
+	lsr x3, x3, 3
+
+	ldr x4, =__return_stack_end
+	sub x4, x4, fp
+	lsr x4, x4, 3
+
+	ldr x5, =__hold_stack_end
+	sub x5, x5, hp
+	lsr x5, x5, 3
+
+	_bare_emit '\n'
+	_bare_emit '!'
+	_bare_emit '!'
+	_bare_emit ' '
+
+	add w0, w1, '!'
+	_bare_emit x0
+	add w0, w3, '0'
+	_bare_emit x0
+	add w0, w4, '0'
+	_bare_emit x0
+	add w0, w5, '0'
+	_bare_emit x0
+
+	_bare_emit ' '
+	_bare_emit '!'
+	_bare_emit '!'
+	_bare_emit '\n'
+
+	b .
+
+.balign 0x200
+b _exc_handler
+.balign 0x200
+b _exc_handler
+.balign 0x200
+b _exc_handler
+
 // ## Entry point
 .global _start
 _start:
-	//### Interpreter initialization
+	// ### Interpreter initialization
+	ldr x9, =_exc_handler
+	msr vbar_el1, x9
+	
 	// Set up the stack starting locations.
 	ldr hp, =__hold_stack_end
 	_setvar hz, hp
@@ -354,6 +428,18 @@ _next
 defcode "dup", 3, , dup
 	ldr x9, [sp]
 	_push x9
+_next
+
+// `( x y z -- y z x )`, rotates the top three elements of the stack backwards.
+defcode "rot", 3, , rot
+	_pop x9, x10, x11
+	_push x10, x11, x9
+_next
+
+// `( x y z -- z x y )`, rotates the top three elements of the stack forwards.
+defcode "-rot", 4, , negrot
+	_pop x9, x10, x11
+	_push x11, x9, x10
 _next
 
 // ## Alternate stack manipulation
@@ -763,6 +849,10 @@ _func _number
 defcode "halt", 4, , halt
 	ldr x0, =PSCI_0_2_FN_SYSTEM_OFF
 	hvc 0
+	_next
+
+defcode "brk", 3, , brk
+	brk 0
 	_next
 
 // `( -- )`, starts a new hold level.
