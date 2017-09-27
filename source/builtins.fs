@@ -2,8 +2,10 @@
 
 \ # Constants and shortcuts
 : literal immediate
+	record
 	' lit ,
 	,
+	play
 ;
 
 \ ## Character constants

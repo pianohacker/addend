@@ -56,7 +56,7 @@
 	.balign 8		// padding to next 8 byte boundary
 	.global \label
 	\label:
-		.dword enter		// codeword - the interpreter
+		.dword _enter		// codeword - the interpreter
 		// list of word pointers follow
 .endm
 
@@ -116,20 +116,6 @@
 	.balign 8
 	const_\label:
 		.dword \initial
-.endm
-
-// ## `defconstinst` - define a const based on an assembled instruction.
-// This must be followed by an instruction and `.skip 4`.
-.macro defconst name, namelen, flags=0, label
-	defcode \name,\namelen,\flags,\label
-		ldr x8, =const_\label
-		ldr x9, [x8]
-		_push x9
-	_next
-
-	.section .data
-	.balign 8
-	const_\label:
 .endm
 
 // # Startup
@@ -231,20 +217,23 @@
 	ret lr
 .endm
 
-// ## `enter` - main interpreter
+// ## `_enter` - main interpreter
 .section .init
 .balign 8
-enter:
+_enter:
 	_push_alt fp, wa
 	add wa, cw, 8
 	_next
 
 // ## Exception handler
 // We add another `emit` here that doesn't depend on a functional return stack.
-.macro _bare_emit, char
+.macro _bare_emitc, char
 	mov x9, \char
-	ldr x8, =UART_START
 	strb w9, [x8]
+.endm
+
+.macro _bare_emit, src
+	strb \src, [x8]
 .endm
 
 .balign 0x200
@@ -268,24 +257,25 @@ _exc_handler:
 	sub x5, x5, hp
 	lsr x5, x5, 3
 
-	_bare_emit '\n'
-	_bare_emit '!'
-	_bare_emit '!'
-	_bare_emit ' '
+	ldr x8, =UART_START
+	_bare_emitc '\n'
+	_bare_emitc '!'
+	_bare_emitc '!'
+	_bare_emitc ' '
 
 	add w0, w1, '!'
-	_bare_emit x0
+	_bare_emit w0
 	add w0, w3, '0'
-	_bare_emit x0
+	_bare_emit w0
 	add w0, w4, '0'
-	_bare_emit x0
+	_bare_emit w0
 	add w0, w5, '0'
-	_bare_emit x0
+	_bare_emit w0
 
-	_bare_emit ' '
-	_bare_emit '!'
-	_bare_emit '!'
-	_bare_emit '\n'
+	_bare_emitc ' '
+	_bare_emitc '!'
+	_bare_emitc '!'
+	_bare_emitc '\n'
 
 	b .
 
@@ -603,7 +593,7 @@ _next
 defword ":", 1, , colon
 	.dword word
 	.dword create
-	.dword lit, enter, comma
+	.dword lit, _enter, comma
 	.dword latest, fetch, hidden
 	.dword hlplus
 	.dword exit
@@ -906,11 +896,11 @@ defcode "play", 4, , play
 	ldr x0, =exit	
 	_call _comma, 2
 
-	// We are playing tricky games with `enter` here; we're loading up the cw for it, but because
-	// there isn't actually a `enter` on the front of our "word", we have to undo `enter`'s skip of
+	// We are playing tricky games with `_enter` here; we're loading up the cw for it, but because
+	// there isn't actually a `_enter` on the front of our "word", we have to undo `_enter`'s skip of
 	// itself.
 	sub cw, x9, 8
-	b enter
+	b _enter
 
 	play_done:
 	_next
@@ -1021,7 +1011,7 @@ defvar "r0", 2, , rz
 // Whether `key` echos while it reads.
 defvar "echo", 4, , echo, 1
 // Most recently defined word; initial value must be the last builtin word in this file.
-defvar "latest", 6, , latest, name_enter_
+defvar "latest", 6, , latest, name_enter
 // Position of next allocated byte.
 defvar "here", 4, , here, __data_seg_end
 // How many levels are held? (0 = interpreting)
@@ -1034,7 +1024,7 @@ defvar "key-buffer", 10, , key_buffer, __builtins_def_start
 defvar "key-buffer-end", 14, , key_buffer_end, __builtins_def_end
 
 // # Builtin constants
-defconst "enter", 5, , enter_, enter
+defconst "enter", 5, , enter, _enter
 
 .section .data
 welcome_message:
