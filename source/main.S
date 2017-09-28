@@ -1,5 +1,4 @@
 .title "ARMForth"
-// vim: set ft=asm :
 
 .set UART_START, 0x09000000
 .set PSCI_0_2_FN_SYSTEM_OFF, 0x84000000 + 8
@@ -118,7 +117,6 @@
 		.dword \initial
 .endm
 
-// # Startup
 // ## Alternate stack macros
 .macro _push_alt stackreg:req, reg:req
 	str \reg, [\stackreg, -8]!
@@ -217,6 +215,7 @@
 	ret lr
 .endm
 
+// # Startup
 // ## `_enter` - main interpreter
 .section .init
 .balign 8
@@ -308,6 +307,7 @@ _start:
 .data
 _interpret_start:
 	.dword quit
+
 
 // # Builtins
 // ## Arithmetic
@@ -1026,6 +1026,8 @@ defvar "key-buffer-end", 14, , key_buffer_end, __builtins_def_end
 // # Builtin constants
 defconst "enter", 5, , enter, _enter
 
+// # Data segment
+
 .section .data
 welcome_message:
 	.ascii "Welcome to ARMForth!\n"
@@ -1055,3 +1057,5 @@ __builtins_def_start:
 __builtins_def_end:
 
 .align 3
+
+// vim: set commentstring=//\ %s ft=asm foldmethod=expr foldexpr=SourceMarkdownFolds() :

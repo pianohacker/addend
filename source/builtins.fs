@@ -94,7 +94,4 @@
 ;
 
 \ # I/O
-: test 64 { 3 + } { 4 + } bi emit emit ;
-0 if 33 emit else 66 emit endif
-test
 

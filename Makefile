@@ -27,9 +27,11 @@ MAP = $(BUILD)/kernel.map
 # The name of the linker script to use.
 LINKER = kernel.ld
 
+SOURCES = main.S
+
 # The names of all object files that must be generated. Deduced from the 
 # assembly code files in source.
-OBJECTS := $(patsubst $(SOURCE)/%.S,$(BUILD)/%.o,$(wildcard $(SOURCE)/*.S))
+OBJECTS := $(patsubst %.S,$(BUILD)/%.o,$(SOURCES))
 
 # Targeted CPU.
 TARGET_CPU = cortex-a57
