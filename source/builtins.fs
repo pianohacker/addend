@@ -13,14 +13,26 @@
 : sp 32 ;
 : '0' [ char 0 ] literal ;
 : 'A' [ char A ] literal ;
+: '"' [ char " ] literal ; \ to fix Vim's syntax highlighting: "
+: '(' [ char ( ] literal ;
+: ')' [ char ) ] literal ;
 
-\ # Control structures
+\ # Core syntax
+\ ## Control structures
 : mark-here here @ >h ;
 : update-mark-offset
 	h@
 	here @ h> -
 	!
-	;
+;
+: branch-to-mark
+	' branch ,
+	h> here @ - ,
+;
+: 0branch-to-mark
+	' 0branch ,
+	h> here @ - ,
+;
 
 : if immediate
 	record
@@ -50,6 +62,59 @@
 	play
 ;
 
+: begin immediate
+	record
+	mark-here
+;
+
+: again immediate
+	branch-to-mark
+	play
+;
+
+: until immediate
+	0branch-to-mark
+	play
+;
+
+\ ## ( ... ) comments
+
+: ( immediate
+	begin key ')' = until
+;
+
+\ ## Strings
+
+: " immediate
+	record
+
+	' litstring ,
+	mark-here
+	0 ,
+
+	begin
+		key
+		dup '"' = if
+			drop
+			1
+		else
+			,c
+			0
+		endif
+	until
+
+	\ Similar to `update-mark-offset`, but `litstring` does not include the 8 bytes of the length in the string length (unlike a `branch` offset).
+	h@
+	here @ h> - 8 -
+	!
+
+	here
+	here @ align
+	!
+
+	play
+;
+
 \ ## Quotations
 
 : { immediate
@@ -64,6 +129,7 @@
 ;
 
 : } immediate
+	' exit ,
 	save
 
 	update-mark-offset
@@ -81,17 +147,32 @@
 	>h
 
 	swap
-	execute 
+	execute
 
 	h>
 ;
 
 : bi
-	-rot \ q2 x q1
-	keep \ q2 a x
-	rot \ a x q2
+	>h \ x q1
+	keep \ ...a x
+	h> \ ...a x q2
+	execute
+;
+
+: tri
+	>h \ x q1 q2
+	>h \ x q1
+	keep \ ...a x
+	h> \ ...a x q2
+	keep \ ...a ...b x
+	h> \ ...a ...b x q3
 	execute
 ;
 
 \ # I/O
 
+" done.
+
+" tell
+
+\ vim: set commentstring=\\\ %s foldmethod=expr foldexpr=SourceMarkdownFolds() :

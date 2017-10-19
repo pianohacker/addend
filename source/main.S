@@ -1,4 +1,4 @@
-.title "ARMForth"
+.title "Addend"
 
 .set UART_START, 0x09000000
 .set PSCI_0_2_FN_SYSTEM_OFF, 0x84000000 + 8
@@ -239,8 +239,8 @@ _enter:
 _exc_handler:
 	mrs x10, esr_el1
 	// Extract the ISS and EC, respectively.
-	ubfx x0, x10, 0, 25 
-	ubfx x1, x10, 26, 6 
+	ubfx x0, x10, 0, 25
+	ubfx x1, x10, 26, 6
 
 	mrs x2, elr_el1
 
@@ -291,7 +291,7 @@ _start:
 	// ### Interpreter initialization
 	ldr x9, =_exc_handler
 	msr vbar_el1, x9
-	
+
 	// Set up the stack starting locations.
 	ldr hp, =__hold_stack_end
 	_setvar hz, hp
@@ -306,8 +306,10 @@ _start:
 
 .data
 _interpret_start:
+	.dword lit, welcome_message
+	.dword lit, welcome_message_len
+	.dword tell
 	.dword quit
-
 
 // # Builtins
 // ## Arithmetic
@@ -359,12 +361,36 @@ _next
 	cmp x9, x10
 .endm
 
+.macro _push_flag cond
+	mov x11, 1
+	csel x11, x11, xzr, \cond
+	_push x11
+.endm
+
 defcode "=", 1, , equal
 	_2cmp
-	mov x11, 1
-	csel x11, x11, xzr, eq
-	_push x11
-_next
+	_push_flag eq
+	_next
+
+defcode ">", 1, , gt
+	_2cmp
+	_push_flag gt
+	_next
+
+defcode "<", 1, , lt
+	_2cmp
+	_push_flag lt
+	_next
+
+defcode ">=", 2, , ge
+	_2cmp
+	_push_flag ge
+	_next
+
+defcode "<=", 2, , le
+	_2cmp
+	_push_flag le
+	_next
 
 // ## Syntax
 defcode "lit", 3, , lit
@@ -482,6 +508,19 @@ defcode "!", 1, , store
 	str x1, [x0]
 _next
 
+// `( address -- value )`, fetches a byte from memory.
+defcode "@c", 2, , fetchbyte
+	_pop x1
+	ldrb w0, [x1]
+	_push x0
+_next
+
+// `( address value -- )`, stores a byte in memory.
+defcode "!c", 2, , storebyte
+	_pop x0, x1
+	strb w1, [x0]
+_next
+
 // ## Control structures
 defcode "exit", 4, , exit
 	_pop_alt fp, wa
@@ -559,17 +598,37 @@ _func _find
 	_return
 
 // ## Codeword manipulation
+// `(value -- )`, appends a word to user memory.
 _func _comma
 	_getvar here, x9
 	str x0, [x9], 8
 	_setvar here, x9
 	_return
 
-// `(value -- )`, appends the value to user memory.
 defcode ",", 1, , comma
 	_pop x0
 	_call _comma
 _next
+
+// `(value -- )`, appends a byte to user memory.
+_func _commabyte
+	_getvar here, x9
+	strb w0, [x9], 1
+	_setvar here, x9
+	_return
+
+defcode ",c", 2, , commabyte
+	_pop x0
+	_call _commabyte
+_next
+
+// `(addr -- addr)`, aligns a pointer to the next multiple of 8.
+defcode "align", 5, , align
+	_pop x9
+	add x9, x9, 7
+	and x9, x9, ~7
+	_push x9
+	_next
 
 // `(word-entry -- )`, toggles the hidden state of the given word.
 defcode "hidden", 6, , hidden
@@ -637,6 +696,10 @@ defcode "key", 3, , key
 	_call _key
 	_push x0
 _next
+
+.macro _clear_key_buffer
+	_setvar key_buffer, xzr
+.endm
 
 _func _key
 	_GETVAR key_buffer, x9
@@ -893,7 +956,7 @@ defcode "play", 4, , play
 	cmp x0, 0
 	b.gt play_done
 
-	ldr x0, =exit	
+	ldr x0, =exit
 	_call _comma, 2
 
 	// We are playing tricky games with `_enter` here; we're loading up the cw for it, but because
@@ -905,13 +968,11 @@ defcode "play", 4, , play
 	play_done:
 	_next
 
-// `( -- addr )`, packages the code since the last `record` and gives back the address.
+// `( -- addr )`, ends the hold level and gives back the starting address since the last `record`.
 defcode "save", 4, , save
 	_call _hlminus
 
 	_pop_alt hp, x9
-	ldr x0, =exit	
-	_call _comma, 2
 
 	_push x9
 	_next
@@ -956,6 +1017,10 @@ defcode "repl", 4, , repl
 	b repl_done
 
 	repl_invalid:
+	// Reset hold level and key buffer, then print an error message.
+	_clear_key_buffer
+	_setvar level, xzr
+
 	_push x0, x1
 	ldr x0, =error_message
 	ldr x1, =error_message_len
@@ -997,9 +1062,6 @@ defcode "repl", 4, , repl
 
 defword "quit", 4, , quit
 	.dword rz, fetch, rspstore
-	.dword lit, welcome_message
-	.dword lit, welcome_message_len
-	.dword tell
 	.dword repl
 	.dword branch, -16
 
@@ -1030,7 +1092,7 @@ defconst "enter", 5, , enter, _enter
 
 .section .data
 welcome_message:
-	.ascii "Welcome to ARMForth!\n"
+	.ascii "Booting Addend... "
 .set welcome_message_len, . - welcome_message
 
 error_message:
