@@ -1,7 +1,8 @@
 .title "Addend"
 
 .set UART_START, 0x09000000
-.set PSCI_0_2_FN_SYSTEM_OFF, 0x84000000 + 8
+.set GICC_IAR, 0x0801000c
+.set GICC_EOIR, 0x08010010
 
 // # Defined registers
 // This code uses the available registers according to the [AArch64 Procedure Call
@@ -14,7 +15,7 @@
 //  * x16 and x17 are off limits, as the assembler may use them in stubs to call faraway functions.
 //  * x20-x26 are callee-saved temporary registers.
 //  * x29 (the Frame Pointer) is used to hold the current top of the return stack.
-#define fp x29
+#define rp x29
 //  * x30 (the Link Register) holds the location of the next instruction after the last `bl`.
 #define lr x30
 //
@@ -206,22 +207,27 @@
 .endm
 
 .macro _func func
+	.func \func, \func
 	\func:
-	_push_alt fp, lr
+	_push_alt rp, lr
 .endm
 
 .macro _return
-	_pop_alt fp, lr
+	_pop_alt rp, lr
 	ret lr
 .endm
 
 // # Startup
-// ## `_enter` - main interpreter
+// ## `_enter` - header for all interpreted words
 .section .init
 .balign 8
 _enter:
-	_push_alt fp, wa
+	_push_alt rp, wa
 	add wa, cw, 8
+	_next
+
+// ## `__next`: exposed version of indirect-threading code, used for empty quotations
+__next:
 	_next
 
 // ## Exception handler
@@ -235,7 +241,6 @@ _enter:
 	strb \src, [x8]
 .endm
 
-.balign 0x200
 _exc_handler:
 	mrs x10, esr_el1
 	// Extract the ISS and EC, respectively.
@@ -249,7 +254,7 @@ _exc_handler:
 	lsr x3, x3, 3
 
 	ldr x4, =__return_stack_end
-	sub x4, x4, fp
+	sub x4, x4, rp
 	lsr x4, x4, 3
 
 	ldr x5, =__hold_stack_end
@@ -278,25 +283,63 @@ _exc_handler:
 
 	b .
 
+_irq_handler:
+	ldr x26, =GICC_IAR
+	ldr w26, [x26]
+
+	// Entertainingly, single-stepping through this code causes the eret to not branch back to the
+	// ELR, so we have to do it ourselves.
+	mrs x24, elr_el1
+
+	ldr x25, =GICC_EOIR
+	str w26, [x25]
+	eret
+	br x24
+
+// Exceptions from EL0.
+.balign 0x200
+_exc_vector:
+// Synchronous exceptions.
+b _exc_handler
+.balign 0x80
+// IRQs.
+b _irq_handler
+
+// Exceptions from ELn, n > 0.
 .balign 0x200
 b _exc_handler
+.balign 0x80
+b _irq_handler
+
+// Exceptions from AArch32 code.
 .balign 0x200
 b _exc_handler
+
 .balign 0x200
 b _exc_handler
 
 // ## Entry point
 .global _start
 _start:
-	// ### Interpreter initialization
-	ldr x9, =_exc_handler
-	msr vbar_el1, x9
+	// ### System initialization
+	// Set the interrupt vector base address.
+	ldr x8, =_exc_vector
+	msr vbar_el1, x8
+	// Enable IRQs. (In DAIF, I is 0, rest is left as 1.)
+	mov x9, (0b1101 << 6)
+	msr daif, x9
+	// Enable UART interrupts.
+	ldr x8, =UART_START
+	add x8, x8, 0x38
+	mov x9, 1 << 4
+	strh w9, [x8]
 
+	// ### Interpreter initialization
 	// Set up the stack starting locations.
 	ldr hp, =__hold_stack_end
 	_setvar hz, hp
-	ldr fp, =__return_stack_end
-	_setvar rz, fp
+	ldr rp, =__return_stack_end
+	_setvar rz, rp
 	ldr sp, =__data_stack_end
 	_setvar sz, sp
 
@@ -392,6 +435,12 @@ defcode "<=", 2, , le
 	_push_flag le
 	_next
 
+defcode "0=", 2, , zequal
+	_pop x9
+	cmp x9, xzr
+	_push_flag eq
+	_next
+
 // ## Syntax
 defcode "lit", 3, , lit
 	ldr cw, [wa], 8
@@ -417,6 +466,17 @@ defcode "0branch", 7, , zbranch
 	add wa, wa, 8
 _next
 
+// `( flag offset -- )`, jumps by the given offset if the flag is false.
+defcode "s0branch", 8, , szbranch
+	_pop x9, x10
+	cmp x9, 0
+	b.ne s0branch_end
+
+	add wa, wa, x10
+
+	s0branch_end:
+	_next
+
 defcode "char", 4, , char
 	_call _word
 	cmp x1, 0
@@ -429,6 +489,12 @@ defcode "char", 4, , char
 _next
 
 // ## Stack manipulation
+// `( -- sp )`, returns the current stack pointer.
+defcode "sp", 2, , _sp
+	mov x9, sp
+	_push x9
+_next
+
 // `( value -- )`, drops a value from the stack.
 defcode "drop", 4, , drop
 	_pop x0
@@ -458,22 +524,41 @@ defcode "-rot", 4, , negrot
 	_push x11, x9, x10
 _next
 
+// `( x t f -- t|f )`, chooses the 2rd or 1st value down in the stack, based on whether x is true
+// or false.
+defcode "choose", 6, , choose
+	_pop x9, x10, x11
+	cmp x9, xzr
+	csel x10, x10, x11, ne
+	_push x10
+_next
+
 // ## Alternate stack manipulation
+// `( -- rp )`, returns the current return stack pointer.
+defcode "rp", 2, , _rp
+	_push rp
+_next
+
 // `( new-return-stack -- )`, changes the return stack pointer.
-defcode "rsp!", 4, , rspstore
-	_pop fp
+defcode "rp!", 4, , rpstore
+	_pop rp
 _next
 
 // `( val -- )`, pushes the given value to the return stack.
 defcode "r>", 2, , tors
 	_pop x0
-	_push_alt fp, x0
+	_push_alt rp, x0
 _next
 
 // `( -- val )`, pops a value from the return stack.
 defcode "r>", 2, , fromrs
-	_pop_alt fp, x0
+	_pop_alt rp, x0
 	_push x0
+_next
+
+// `( -- hp )`, returns the current hold stack pointer.
+defcode "hp", 2, , _hp
+	_push hp
 _next
 
 // `( val -- )`, pushes the given value to the hold stack.
@@ -494,36 +579,89 @@ defcode "h@", 2, , fetchhs
 	_push x0
 _next
 
+// `( -- val )`, fetches the 2nd-from-top value from the hold stack without changing it.
+defcode "hover@", 6, , twofetchhs
+	ldp x0, x1, [hp]
+	_push x0, x1
+_next
+
+// `( -- )`, drops the top value from the hold stack.
+defcode "hdrop", 5, , hdrop
+	_pop_alt hp, x0
+_next
+
 // ## Memory
-// `( address -- value )`, fetches a word from memory.
+// `( address -- value )`, fetches a quad from memory.
 defcode "@", 1, , fetch
-	_pop x1
-	ldr x0, [x1]
-	_push x0
+	_pop x10
+	ldr x9, [x10]
+	_push x9
+_next
+
+// `( address value -- )`, stores a quad in memory.
+defcode "!", 1, , store
+	_pop x9, x10
+	str x10, [x9]
+_next
+
+// `( address -- value )`, fetches a word from memory.
+defcode "@w", 2, , fetchword
+	_pop x10
+	ldr w9, [x10]
+	_push x9
 _next
 
 // `( address value -- )`, stores a word in memory.
-defcode "!", 1, , store
-	_pop x0, x1
-	str x1, [x0]
+defcode "!w", 2, , storeword
+	_pop x9, x10
+	str w10, [x9]
 _next
 
 // `( address -- value )`, fetches a byte from memory.
 defcode "@c", 2, , fetchbyte
-	_pop x1
-	ldrb w0, [x1]
-	_push x0
+	_pop x10
+	ldrb w9, [x10]
+	_push x9
 _next
 
 // `( address value -- )`, stores a byte in memory.
 defcode "!c", 2, , storebyte
-	_pop x0, x1
-	strb w1, [x0]
+	_pop x9, x10
+	strb w10, [x9]
+_next
+
+// `( address bit-pos -- value )`, fetches a bit from memory.
+defcode "@b", 2, , fetchbit
+	_pop x9, x10
+	ldr x11, [x9]
+	lsr x11, x11, x10
+	and x11, x11, 1
+	_push x11
+_next
+
+// `( address bit-pos value -- )`, stores a bit in memory.
+defcode "!b", 2, , storebit
+	_pop x9, x10, x11
+
+	// Prepare the bitmask.
+	mov x12, 1
+	lsl x12, x12, x10
+
+	// Load the old value, and mask out all but our bit.
+	ldr x13, [x9]
+	bic x13, x13, x12
+
+	// Prepare the shifted value.
+	lsl x11, x11, x10
+
+	// Fold in and store the combined value.
+	orr x13, x13, x11
+	str x13, [x9]
 _next
 
 // ## Control structures
 defcode "exit", 4, , exit
-	_pop_alt fp, wa
+	_pop_alt rp, wa
 _next
 
 // ## Dictionary manipulation
@@ -596,6 +734,7 @@ _func _find
 
 	_find_done:
 	_return
+.endfunc
 
 // ## Codeword manipulation
 // `(value -- )`, appends a word to user memory.
@@ -604,6 +743,7 @@ _func _comma
 	str x0, [x9], 8
 	_setvar here, x9
 	_return
+.endfunc
 
 defcode ",", 1, , comma
 	_pop x0
@@ -616,6 +756,7 @@ _func _commabyte
 	strb w0, [x9], 1
 	_setvar here, x9
 	_return
+.endfunc
 
 defcode ",c", 2, , commabyte
 	_pop x0
@@ -681,6 +822,7 @@ _func _tcfa
 	add x0, x0, 7
 	and x0, x0, ~7
 	_return
+.endfunc
 
 // `(word-entry -- codeword-ptr)`, converts a word address to a codeword address.
 defcode ">cfa", 4, , tcfa
@@ -718,13 +860,18 @@ _func _key
 
 	_key_serial:
 	ldr x10, =UART_START
+	_GETVAR key_wfi, x12
 	_key_wait_for_input:
 	// Load RXFF (receive fifo full) from UARTFR (flags register)
 	ldrb w9, [x10,0x18]
 	ubfx w9, w9, 6, 1
 	cmp w9, 1
 	b.eq _key_read
-	wfe
+
+	cmp x12, 0
+	b.eq _key_wait_for_input
+	wfi
+
 	b _key_wait_for_input
 
 	_key_read:
@@ -743,6 +890,7 @@ _func _key
 
 	_key_done:
 	_return
+.endfunc
 
 defcode "word", 4, , word
 	_call _word
@@ -783,11 +931,13 @@ _func _word
 	b.ne _word_skip_comment
 	b _word_key
 	_return
+.endfunc
 
 _func _emit
 	ldr x8, =UART_START
 	strb w0, [x8]
 	_return
+.endfunc
 
 // `( character -- )`, emits a single character.
 defcode "emit", 4, , emit
@@ -810,6 +960,7 @@ _func _tell
 
 	_tell_done:
 	_return
+.endfunc
 
 defcode "tell", 4, , tell
 	_pop x0, x1
@@ -897,10 +1048,29 @@ _func _number
 	// Multiply in the sign.
 	mul x3, x3, x10
 	_return
+.endfunc
 
-// `( -- )`, powers off the machine.
-defcode "halt", 4, , halt
-	ldr x0, =PSCI_0_2_FN_SYSTEM_OFF
+// `( r0 .. rn n -- )`, issues an hvc call with n arguments.
+defcode "hvc", 3, , hvc
+	_pop x9
+
+	_pop x0
+	subs x9, x9, 1
+	b.eq hvc_do
+
+	_pop x1
+	subs x9, x9, 1
+	b.eq hvc_do
+
+	_pop x2
+	subs x9, x9, 1
+	b.eq hvc_do
+
+	_pop x3
+	subs x9, x9, 1
+	b.eq hvc_do
+
+	hvc_do:
 	hvc 0
 	_next
 
@@ -914,6 +1084,7 @@ _func _hlplus
 	add x0, x0, 1
 	_setvar level, x0
 	_return
+.endfunc
 
 defcode "hl+", 4, , hlplus
 	_call _hlplus
@@ -927,6 +1098,7 @@ _func _hlminus
 	csel x0, x0, x9, ge
 	_setvar level, x0
 	_return
+.endfunc
 
 defcode "hl-", 4, , hlminus
 	_call _hlminus
@@ -1061,7 +1233,7 @@ defcode "repl", 4, , repl
 
 
 defword "quit", 4, , quit
-	.dword rz, fetch, rspstore
+	.dword rz, fetch, rpstore
 	.dword repl
 	.dword branch, -16
 
@@ -1073,7 +1245,7 @@ defvar "r0", 2, , rz
 // Whether `key` echos while it reads.
 defvar "echo", 4, , echo, 1
 // Most recently defined word; initial value must be the last builtin word in this file.
-defvar "latest", 6, , latest, name_enter
+defvar "latest", 6, , latest, name___end_of_builtins__
 // Position of next allocated byte.
 defvar "here", 4, , here, __data_seg_end
 // How many levels are held? (0 = interpreting)
@@ -1084,9 +1256,15 @@ defvar "base", 4, , base, 10
 // `key-buffer` if it is nonzero.
 defvar "key-buffer", 10, , key_buffer, __builtins_def_start
 defvar "key-buffer-end", 14, , key_buffer_end, __builtins_def_end
+// Check whether `key` should wait for interrupts.
+// This has to start at 0 until the GIC is configured.
+defvar "key-wfi", 7, , key_wfi, 0
 
 // # Builtin constants
 defconst "enter", 5, , enter, _enter
+defconst "next", 4, , next, __next
+
+defconst "--end-of-builtins--", 0, F_HIDDEN, __end_of_builtins__, 0
 
 // # Data segment
 
